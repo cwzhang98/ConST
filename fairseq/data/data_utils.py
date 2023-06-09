@@ -489,7 +489,9 @@ def get_mem_usage():
 
 
 def lengths_to_padding_mask(lens: torch.LongTensor) -> torch.BoolTensor:
+    # get batch size and the longest sequence length in a batch
     bsz, max_lens = lens.size(0), torch.max(lens).item()
+    # generate padding mask tensor
     mask = torch.arange(max_lens).to(lens.device).view(1, max_lens)
     mask = mask.expand(bsz, -1) >= lens.view(bsz, 1).expand(-1, max_lens)
     return mask

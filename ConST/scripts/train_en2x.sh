@@ -6,20 +6,18 @@ shift 1
 
 # download Wav2vec2 model
 
-mkdir -p checkpoints
-wget -P checkpoints https://dl.fbaipublicfiles.com/fairseq/wav2vec/wav2vec_small.pt
-
+# mkdir -p checkpoints
+# wget -P checkpoints https://dl.fbaipublicfiles.com/fairseq/wav2vec/wav2vec_small.pt
 mkdir -p ${MODEL_DIR}
 
-fairseq-train ./data \
+fairseq-train ../MuST-C-RAW \
     --task speech_to_text_triplet_with_extra_mt \
     --train-subset train_st --valid-subset dev_st \
-    --config-yaml config_st.yaml \
-    --langpairs en-${TGT_LANG} --lang-prefix-tok <lang:${TGT_LANG}> \
+    --config-yaml ../MuST-C-RAW/en-de/config_st.yaml \
+    --langpairs en-${TGT_LANG} --lang-prefix-tok \<lang:${TGT_LANG}\> \
     --max-audio-positions 600000 --max-source-positions 1024 --max-target-positions 1024 \
-    --max-audio-tokens 1000000 --max-text-tokens 2000 --max-tokens 1000000  --max-tokens-valid 2000000 \
+    --max-audio-tokens 1000000 --max-text-tokens 2000 --max-tokens 500000  --max-tokens-valid 2000000 \
     --skip-invalid-size-inputs-valid-test \
-    --external-parallel-mt-data extra_mt/bin/ \
     --text-data-sample-ratio 0.25 \
     \
     --arch xstnet_base --w2v2-model-path checkpoints/wav2vec_small.pt \
@@ -31,15 +29,18 @@ fairseq-train ./data \
     --label-smoothing 0.1 --ignore-prefix-size 1 --report-accuracy \
     --contrastive-weight 1.0 --contrastive-temperature 0.02 --contrastive-seqlen-type none \
     \
-    --update-freq 2 --max-update 500000 \
+    --update-freq 4 --max-update 500000 \
     \
-    --no-progress-bar --log-format json --log-interval 100 \
+    --no-progress-bar --log-format json --log-interval 50 \
     --save-interval-updates 1000 --save-interval 1 \
     --keep-last-epochs 10 --keep-interval-updates 15 --keep-best-checkpoints 10 \
-    --save-dir ${MODEL_DIR} \
+    --save-dir ${MODEL_DIR} --restore-file ${MODEL_DIR}/checkpoint_last.pt \
     --ddp-backend=no_c10d --fp16 \
     \
     --eval-bleu --eval-bleu-args '{"beam": 4, "prefix_size": 1}' \
     --eval-bleu-detok moses --eval-bleu-remove-bpe --eval-bleu-print-samples \
-    --eval-bleu-bpe sentencepiece --eval-bleu-bpe-path ./data/spm_unigram10000_st.model \
-    --best-checkpoint-metric bleu --maximize-best-checkpoint-metric
+    --eval-bleu-bpe sentencepiece --eval-bleu-bpe-path ../MuST-C-RAW/en-de/spm_unigram10000_st.model \
+    --best-checkpoint-metric bleu --maximize-best-checkpoint-metric \
+    --tensorboard-logdir logs_freeze_w2v \
+    --freeze-w2v
+#    --external-parallel-mt-data extra_mt/bin/

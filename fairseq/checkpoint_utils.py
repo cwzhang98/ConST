@@ -160,7 +160,9 @@ def load_checkpoint(cfg: CheckpointConfig, trainer, **passthrough_args):
             cfg.save_dir, "checkpoint_last{}.pt".format(suffix)
         )
         first_launch = not PathManager.exists(checkpoint_path)
-        if cfg.finetune_from_model is not None and first_launch:
+        if first_launch and getattr(cfg, "continue_once", None) is not None:
+            checkpoint_path = cfg.continue_once
+        elif cfg.finetune_from_model is not None and first_launch:
             # if there is no last checkpoint to restore, start the finetune from pretrained model
             # else just use usual logic to load checkpoint, e.g. restart from last checkpoint and etc.
             if PathManager.exists(cfg.finetune_from_model):

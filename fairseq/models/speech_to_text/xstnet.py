@@ -38,10 +38,11 @@ logger = logging.getLogger(__name__)
 class XSTNet(FairseqEncoderDecoderModel):
     def __init__(self, encoder, decoder):
         super().__init__(encoder, decoder)
-        self.is_text_input = False # default
+        self.is_text_input = False  # default
 
     @staticmethod
     def add_args(parser):
+        # call S2TTransformerModelW2V2.add_args() to add args corresponding to w2v module
         S2TTransformerModelW2V2.add_args(parser)
         parser.add_argument("--textual-encoder-embed-dim", type=int, metavar="N",
                             help="encoder embded dim for text input")
@@ -49,6 +50,7 @@ class XSTNet(FairseqEncoderDecoderModel):
     @classmethod
     def build_encoder(cls, args, dict, embed_tokens):
         encoder = XSTNetEncoder(args, dict, embed_tokens)
+        # load pretrained encoder if available
         if getattr(args, "load_pretrained_encoder_from", None):
             encoder = checkpoint_utils.load_pretrained_component_from_model(
                 component=encoder, checkpoint=args.load_pretrained_encoder_from
@@ -79,6 +81,7 @@ class XSTNet(FairseqEncoderDecoderModel):
     def build_model(cls, args, task):
         """Build a new model instance."""
         # make sure all arguments are present in older models
+        # build full architecture
         base_architecture(args)
         decoder_embed_tokens = cls.build_embedding(args, task.target_dictionary, args.decoder_embed_dim)
         encoder = cls.build_encoder(args, task.target_dictionary, decoder_embed_tokens)
@@ -86,10 +89,10 @@ class XSTNet(FairseqEncoderDecoderModel):
         return cls(encoder, decoder)
 
     def get_normalized_probs(
-        self,
-        net_output: Tuple[Tensor, Optional[Dict[str, List[Optional[Tensor]]]]],
-        log_probs: bool,
-        sample: Optional[Dict[str, Tensor]] = None,
+            self,
+            net_output: Tuple[Tensor, Optional[Dict[str, List[Optional[Tensor]]]]],
+            log_probs: bool,
+            sample: Optional[Dict[str, Tensor]] = None,
     ):
         # net_output['encoder_out'] is a (B, T, D) tensor
         lprobs = self.get_normalized_probs_scriptable(net_output, log_probs, sample)
@@ -97,6 +100,9 @@ class XSTNet(FairseqEncoderDecoderModel):
         return lprobs
 
     def set_mt_only(self):
+        """
+        set perform MT task only
+        """
         self.is_text_input = True
         self.encoder.is_text_input = True
 
@@ -117,21 +123,28 @@ class XSTNetEncoder(FairseqEncoder):
         super().__init__(dictionary)
         self.args = args
         self.embed_tokens = embed_tokens
+        # module_name：assign name for call FairseqDropout.make_generation_fast_ func to keep dropout during inference
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
         )
+        # set index of <pad> token in dict
         self.padding_idx = embed_tokens.padding_idx
+        # embed_tokens is an embedding layer of nn.Embedding
         self.textual_encoder_embed_dim = embed_tokens.embedding_dim
+        # keep scale of numerical value of embedding vectors similar to positional encoding
         self.embed_scale = 1.0 if args.no_scale_embedding else math.sqrt(self.textual_encoder_embed_dim)
-
+        # build acoustic and text encoders
         self._build_acoustic_encoder(args)
         self._build_textual_encoder(args)
+        # default take acoustic inputs
         self.is_text_input = False
 
         # CTC module
+        # use CTC module in ablation study
         self.use_ctc = (("ctc" in getattr(args, "ablation_type", "")) and (getattr(args, "ablation_weight", 0.0) > 0)) \
-            or (("ctc" in getattr(args, "criterion", "")) and (getattr(args, "ctc_weight", 0.0) > 0))
+                       or (("ctc" in getattr(args, "criterion", "")) and (getattr(args, "ctc_weight", 0.0) > 0))
         if self.use_ctc:
+            # perform ctc projection layer after cnn down-sampling
             if (getattr(args, "ablation_type", False) == "ctc_cnn") or \
                     (getattr(args, "ctc_type", False) == "ctc_cnn"):
                 self.ctc_type = "ctc_cnn"
@@ -141,6 +154,7 @@ class XSTNetEncoder(FairseqEncoder):
                     bias=False,
                 )
                 self.ctc_projection.weight = embed_tokens.weight
+            # perform ctc projection layer after w2v
             elif (getattr(args, "ablation_type", False) == "ctc_w2v") or \
                     (getattr(args, "ctc_type", False) == "ctc_w2v"):
                 self.ctc_type = "ctc_w2v"
@@ -148,6 +162,7 @@ class XSTNetEncoder(FairseqEncoder):
                     self.w2v_args.encoder_embed_dim,
                     embed_tokens.weight.shape[0],
                 )
+            # softmax after ctc projection
             self.ctc_softmax = nn.Softmax(dim=-1)
 
     def _build_acoustic_encoder(self, args):
@@ -161,14 +176,20 @@ class XSTNetEncoder(FairseqEncoder):
                 os.system(f"wget https://dl.fbaipublicfiles.com/fairseq/wav2vec/wav2vec_small.pt")
             ckpt = torch.load("wav2vec_small.pt")
         self.w2v_args = ckpt["args"]
-        if not self.use_asr_finetune_w2v:  # if use ssl-trained only
+        # if use ssl-trained only
+        if not self.use_asr_finetune_w2v:
             self.w2v_args = ckpt["args"]
             self.wav2vec_model = Wav2Vec2Model.build_model(ckpt['args'], task=None)
             self.wav2vec_model.load_state_dict(ckpt['model'])
+            # freeze wav2vec parameters
+            for parameter in self.wav2vec_model.parameters():
+                parameter.requires_grad = False
         else:  # wav2vec-ctc model
             ckpt["args"].data = args.data
+            # load dictionary for ctc
             if not os.path.exists(os.path.join(ckpt["args"].data, f"dict.{ckpt['args'].labels}.txt")):
                 os.system(f"wget -P {ckpt['args'].data} https://dl.fbaipublicfiles.com/fairseq/wav2vec/dict.ltr.txt")
+            # setup finetune w2v-ctc
             task = tasks.setup_task(ckpt["args"])
             model_finetuned = Wav2VecCtc.build_model(ckpt["args"], task=task)
             model_finetuned.load_state_dict(ckpt['model'])
@@ -177,6 +198,7 @@ class XSTNetEncoder(FairseqEncoder):
         self.freeze_w2v = args.freeze_w2v
 
         w2v_output_dim = self.w2v_args.encoder_embed_dim
+        # cnn down-sampling
         self.subsample_audio = Conv1dSubsampler(
             w2v_output_dim,
             args.conv_channels,
@@ -200,6 +222,7 @@ class XSTNetEncoder(FairseqEncoder):
             self.layernorm_embedding = LayerNorm(self.textual_encoder_embed_dim)
         else:
             self.layernorm_embedding = None
+        # Transformer Encoder stacks
         self.transformer_layers = nn.ModuleList(
             [TransformerEncoderLayer(args) for _ in range(args.encoder_layers)]
         )
@@ -209,13 +232,24 @@ class XSTNetEncoder(FairseqEncoder):
             self.layer_norm = None
 
     def _get_w2v_feature(self, src_tokens, src_lengths):
+        """
+        Args:
+            src_tokens: (B, T)
+            src_lengths: (B)
+        """
+        # padding_mask bool tensor: (B, T)
         padding_mask = lengths_to_padding_mask(src_lengths)
+        # apply forward func in wav2vec_model, obtain output tensor and padding_mask tensor
         w2v_feature, padding_mask = self.wav2vec_model.extract_features(src_tokens, padding_mask)
+        # valid length with respect to every sequence
         output_length = (1 - padding_mask.int()).sum(dim=1)
         return w2v_feature, padding_mask, output_length
 
     def embedding_mask_audio_seq(self, src_tokens, src_lengths, mask_configs=None,
                                  return_short_audio_len=False):
+        """
+        mask audio sequence during forward,for hard example or data augmentation?
+        """
         # src_tokens: b x frame, original audio_src_tokens
         padding_mask = lengths_to_padding_mask(src_lengths)
         masked_src_tokens = src_tokens.clone()
@@ -254,6 +288,7 @@ class XSTNetEncoder(FairseqEncoder):
 
     def embedding_audio(self, src_tokens, src_lengths,
                         return_short_audio_len=False):
+        # forward audio input in w2v
         if self.freeze_w2v:
             with torch.no_grad():
                 w2v_feature, encoder_padding_mask, input_lengths = self._get_w2v_feature(
@@ -261,10 +296,13 @@ class XSTNetEncoder(FairseqEncoder):
         else:
             w2v_feature, encoder_padding_mask, input_lengths = self._get_w2v_feature(
                 src_tokens, src_lengths)
-
+        # cnn subsampling
         x, input_lengths = self.subsample_audio(w2v_feature, input_lengths)
         x = self.embed_scale * x
+        # after w2v and subsampling, the padding mask tensor is different from which before input into acoustic encoder
+        # re-obtain mask tensor
         encoder_padding_mask = lengths_to_padding_mask(input_lengths)
+        # audio positional encoding
         if self.embed_positions is not None:
             positions = self.embed_positions(encoder_padding_mask).transpose(0, 1)
             x += positions
@@ -274,14 +312,18 @@ class XSTNetEncoder(FairseqEncoder):
         return x, encoder_padding_mask, None
 
     def embedding_text(self, src_tokens, src_lengths):
+        # pass text embedding layer
         token_embedding = self.embed_tokens(src_tokens)
         x = self.embed_scale * token_embedding
+        # add positional encoding
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
+        # pass layer_norm after embedding layer
         if self.layernorm_embedding is not None:
             x = self.layernorm_embedding(x)
         x = self.dropout_module(x)
-        x = x.transpose(0, 1) # B x T x C -> T x B x C
+        x = x.transpose(0, 1)  # B x T x C -> T x B x C
+        # set text encoder padding mask matrix
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
         return x, encoder_padding_mask
 
@@ -294,8 +336,10 @@ class XSTNetEncoder(FairseqEncoder):
         if self.is_text_input:
             is_text_input = True
         if is_text_input:
+            # forward text input
             x, encoder_padding_mask = self.embedding_text(src_tokens, src_lengths)
         else:
+            # forward audio input
             x, encoder_padding_mask, short_audio_len = self.embedding_audio(src_tokens, src_lengths,
                                                                             return_short_audio_len=True)
         encoder_embedding = x
@@ -304,7 +348,7 @@ class XSTNetEncoder(FairseqEncoder):
             x = layer(x, encoder_padding_mask)
         if self.layer_norm is not None:
             x = self.layer_norm(x)
-
+        # return NamedTuple as output
         return EncoderOut(
             encoder_out=x,
             encoder_padding_mask=encoder_padding_mask,
@@ -352,19 +396,20 @@ class XSTNetEncoder(FairseqEncoder):
         w2v_feature, encoder_padding_mask, input_lengths = self._get_w2v_feature(
             src_tokens, src_lengths
         )
-        encoder_state = w2v_feature # b x seq x 768
+        encoder_state = w2v_feature  # b x seq x 768
         if self.ctc_type == "ctc_cnn":
-            encoder_state, input_lengths = self.subsample_audio(w2v_feature, input_lengths) # seq x b x 512
-            encoder_state = encoder_state.transpose(0, 1) # b x seq x 512
+            encoder_state, input_lengths = self.subsample_audio(w2v_feature, input_lengths)  # seq x b x 512
+            encoder_state = encoder_state.transpose(0, 1)  # b x seq x 512
             encoder_state = self.embed_scale * encoder_state
             encoder_padding_mask = lengths_to_padding_mask(input_lengths)
         else:
             assert self.ctc_type == "ctc_w2v", "ctc type should be ctc_w2v or ctc_cnn"
+        # forward in ctc module
         encoder_state = self.dropout_module(encoder_state)
-        ctc_logit = self.ctc_projection(encoder_state) # b x seq x voc
+        ctc_logit = self.ctc_projection(encoder_state)  # b x seq x voc
         logits = ctc_logit.float()
         log_probs = nn.functional.log_softmax(logits, dim=-1)
-        log_probs = log_probs.transpose(0, 1) # seq x b x voc
+        log_probs = log_probs.transpose(0, 1)  # seq x b x voc
         return ctc_logit, encoder_padding_mask, log_probs
 
 
@@ -372,7 +417,7 @@ class XSTNetEncoder(FairseqEncoder):
 def base_architecture(args):
     # Wav2vec2.0 feature-extractor
     args.w2v2_model_path = getattr(args, "w2v2_model_path", "./wav2vec_small_100h.pt")
-    args.freeze_w2v = getattr(args, "freeze_w2v", False) # default is false, 'store_true'
+    args.freeze_w2v = getattr(args, "freeze_w2v", True)  # default is false, 'store_true'
     args.use_asr_finetune_w2v = getattr(args, "use_asr_finetune_w2v", False)
 
     # Convolutional subsampler

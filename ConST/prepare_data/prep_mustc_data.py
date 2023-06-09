@@ -18,9 +18,7 @@ from data_utils import filter_manifest_df, gen_config_yaml, gen_vocab, save_df_t
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-
 log = logging.getLogger(__name__)
-
 
 MANIFEST_COLUMNS = ["id", "audio", "n_frames", "speaker",
                     "src_text", "tgt_text", "src_lang", "tgt_lang"]
@@ -37,6 +35,7 @@ class MUSTC(Dataset):
     LANGUAGES = ["de", "es", "fr", "it", "nl", "pt", "ro", "ru"]
 
     def __init__(self, root: str, lang: str, split: str) -> None:
+        # verify data source
         assert split in self.SPLITS and lang in self.LANGUAGES
         _root = op.join(root, f"en-{lang}", "data", split)
         wav_root, txt_root = op.join(_root, "wav"), op.join(_root, "txt")
@@ -57,11 +56,15 @@ class MUSTC(Dataset):
                 segments[i][_lang] = u
         # Gather info
         self.data = []
+        # one wav file could correspond to multiple transcripts and translations
         for wav_filename, _seg_group in groupby(segments, lambda x: x["wav"]):
+            # get relative wav file path
             wav_path = op.join(wav_root, wav_filename)
             relative_wav_path = op.relpath(wav_path, root)
+            # get audio sample rate by torchaudio
             sample_rate = torchaudio.info(wav_path).sample_rate
             seg_group = sorted(_seg_group, key=lambda x: x["offset"])
+            # set info of multiple data samples correspond to one audio
             for i, segment in enumerate(seg_group):
                 offset = int(float(segment["offset"]) * sample_rate)
                 n_frames = int(float(segment["duration"]) * sample_rate)
@@ -87,15 +90,20 @@ class MUSTC(Dataset):
 
 
 def process(args):
+    # read en-x dateset
     lang = args.lang
     cur_root = op.join(args.data_root, f"en-{lang}")
     if not op.isdir(cur_root):
         FileExistsError(f"{cur_root} does not exist.")
     train_text = []
+    # process different splits
     for split in MUSTC.SPLITS:
         is_train_split = split.startswith("train")
+        # generate tsv dict
         manifest = {c: [] for c in MANIFEST_COLUMNS}
+        # instance of MUSTC class contain info for a split
         dataset = MUSTC(args.data_root, lang, split)
+        # write data into dict
         for wav_path, offset, n_frames, sr, src_utt, tgt_utt, spk_id, utt_id in tqdm(dataset):
             manifest["id"].append(utt_id)
             manifest["audio"].append(f"{wav_path}:{offset}:{n_frames}")
@@ -105,21 +113,28 @@ def process(args):
             manifest["src_lang"].append("en")
             manifest["tgt_lang"].append(lang)
             manifest["src_text"].append(src_utt)
+        # extract training data: transcript and translation
         if is_train_split:
             train_text.extend(manifest["tgt_text"])
             train_text.extend(manifest["src_text"])
+        # generate tsv columns
         df = pd.DataFrame.from_dict(manifest)
+        # filter dataframe with min/max frames restrictions
         df = filter_manifest_df(df, is_train_split=is_train_split, min_n_frames=1000, max_n_frames=480000)
-        save_df_to_tsv(df, op.join(args.data_root, f"{split}_st.tsv"))
+        # generate tsv file
+        save_df_to_tsv(df, op.join(cur_root, f"{split}_st.tsv"))
 
     v_size_str = "" if args.vocab_type == "char" else str(args.vocab_size)
+    # set file name
     spm_filename_prefix = f"spm_{args.vocab_type}{v_size_str}_st"
+    # TemporaryFile for generate vocab file
     with NamedTemporaryFile(mode="w") as f:
         for t in train_text:
             f.write(t + "\n")
+        # generate vocab/SentencePiece model/txt file
         gen_vocab(
             f.name,
-            op.join(args.data_root, spm_filename_prefix),
+            op.join(cur_root, spm_filename_prefix),
             args.vocab_type,
             args.vocab_size,
             accept_language=["en", f"{lang}"],
@@ -127,7 +142,8 @@ def process(args):
         )
     # Generate config YAML
     gen_config_yaml(
-        args.data_root,
+        cur_root,
+        args.lang,
         spm_filename_prefix + ".model",
         yaml_filename=f"config_st.yaml",
         prepend_tgt_lang_tag=True,

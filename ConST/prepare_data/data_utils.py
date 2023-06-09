@@ -25,6 +25,7 @@ def gen_vocab(input_path: str,
               user_defined_symbols=None
               ):
     # Train SentencePiece Model
+    # .model and .vocab file will be generated
     sp.SentencePieceTrainer.train(input=input_path,
                                   model_prefix=output_path_prefix,
                                   model_type=model_type,
@@ -36,34 +37,41 @@ def gen_vocab(input_path: str,
                                   eos_piece=EOS_TOKEN, eos_id=EOS_TOKEN_ID,
                                   pad_piece=PAD_TOKEN, pad_id=PAD_TOKEN_ID)
     # Export fairseq dictionary
+    # Load trained SentencePiece model
     spm = sp.SentencePieceProcessor()
     spm.Load(output_path_prefix + ".model")
+    # set vocab dict，key: sub-word id, value: sub-word piece
     vocab = {i: spm.IdToPiece(i) for i in range(spm.GetPieceSize())}
     assert (
-        vocab.get(UNK_TOKEN_ID) == UNK_TOKEN
-        and vocab.get(PAD_TOKEN_ID) == PAD_TOKEN
-        and vocab.get(BOS_TOKEN_ID) == BOS_TOKEN
-        and vocab.get(EOS_TOKEN_ID) == EOS_TOKEN
+            vocab.get(UNK_TOKEN_ID) == UNK_TOKEN
+            and vocab.get(PAD_TOKEN_ID) == PAD_TOKEN
+            and vocab.get(BOS_TOKEN_ID) == BOS_TOKEN
+            and vocab.get(EOS_TOKEN_ID) == EOS_TOKEN
     )
+    # remove vocab which only consist of single unique token
     vocab = {
         i: s
         for i, s in vocab.items()
         if s not in {UNK_TOKEN, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN}
     }
+    # generate txt file ordered by id
     with open(output_path_prefix + ".txt", "w") as f_out:
         for _, s in sorted(vocab.items(), key=lambda x: x[0]):
             f_out.write(f"{s} 1\n")
 
 
 def gen_config_yaml(
-    data_root,
-    spm_filename,
-    yaml_filename="config.yaml",
-    prepend_tgt_lang_tag=True,
-    prepend_src_lang_tag=True
+        data_root,
+        language_pair,
+        spm_filename,
+        yaml_filename="config.yaml",
+        prepend_tgt_lang_tag=True,
+        prepend_src_lang_tag=True
 ):
     data_root = op.abspath(data_root)
+    # init a yaml file
     writer = S2TDataConfigWriter(op.join(data_root, yaml_filename))
+    # set some information
     writer.set_audio_root(op.abspath(data_root))
     writer.set_vocab_filename(spm_filename.replace(".model", ".txt"))
     writer.set_input_channels(1)
@@ -77,6 +85,8 @@ def gen_config_yaml(
     writer.set_prepend_src_lang_tag(prepend_src_lang_tag)
     writer.set_use_audio_input(True)
     writer.set_shuffle_dataset(True)
+    writer.set_language_pair(f"en-{language_pair}")
+    # write settings to yaml file
     writer.flush()
 
 
@@ -105,8 +115,12 @@ def save_df_to_tsv(dataframe, path):
 
 
 def filter_manifest_df(
-    df, is_train_split=False, extra_filters=None, min_n_frames=5, max_n_frames=3000
+        df, is_train_split=False, extra_filters=None, min_n_frames=5, max_n_frames=3000
 ):
+    """
+    filter dataframe by eliminate exceptions in filter dict
+    the key of filter dict is a bool list
+    """
     filters = {
         "no speech": df["audio"] == "",
         f"short speech (<{min_n_frames} frames)": df["n_frames"] < min_n_frames,
@@ -116,6 +130,8 @@ def filter_manifest_df(
         filters[f"long speech (>{max_n_frames} frames)"] = df["n_frames"] > max_n_frames
     if extra_filters is not None:
         filters.update(extra_filters)
+    # if all exceptions in filter dict with respect to a row in dataframe are not satisfied(meaning the dataframe is
+    # desired) then the corresponding element will be 0, otherwise will be 1
     invalid = reduce(lambda x, y: x | y, filters.values())
     valid = ~invalid
     print(
@@ -123,6 +139,7 @@ def filter_manifest_df(
         + ", ".join(f"{n}: {f.sum()}" for n, f in filters.items())
         + f", total {invalid.sum()} filtered, {valid.sum()} remained."
     )
+    # return valid dataframe row
     return df[valid]
 
 
@@ -236,3 +253,6 @@ class S2TDataConfigWriter(object):
 
     def set_shuffle_dataset(self, flag=True):
         self.config["shuffle"] = flag
+
+    def set_language_pair(self, language_pair="en-de"):
+        self.config["language_pair"] = language_pair

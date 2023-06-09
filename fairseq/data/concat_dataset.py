@@ -28,14 +28,21 @@ class ConcatDataset(FairseqDataset):
         if isinstance(sample_ratios, int):
             sample_ratios = [sample_ratios] * len(self.datasets)
         self.sample_ratios = sample_ratios
+        # cumulative_sizes[i]: \sum_{k=0}^i len(self.datasets[k])
         self.cumulative_sizes = self.cumsum(self.datasets, sample_ratios)
         self.real_sizes = [len(d) for d in self.datasets]
 
     def __len__(self):
+        # total length equals last element of cumulative_sizes
         return self.cumulative_sizes[-1]
 
     def __getitem__(self, idx):
+        """
+        through this class, in spite of which dataset that this idx belongs to, we can directly get a sample by pass
+        the index of this sample in concatenated dataset to this __getitem__() method
+        """
         dataset_idx, sample_idx = self._get_dataset_and_sample_index(idx)
+        # call SpeechTextTripleDataset.__getitem__()
         return self.datasets[dataset_idx][sample_idx]
 
     def _get_dataset_and_sample_index(self, idx: int):
@@ -50,6 +57,7 @@ class ConcatDataset(FairseqDataset):
     def collater(self, samples, **extra_args):
         # For now only supports datasets with same underlying collater implementations
         if hasattr(self.datasets[0], "collater"):
+            # call SpeechTextTripleDataset.collater()
             return self.datasets[0].collater(samples, **extra_args)
         else:
             return default_collate(samples, **extra_args)
@@ -59,6 +67,7 @@ class ConcatDataset(FairseqDataset):
         Return an example's size as a float or tuple.
         """
         dataset_idx, sample_idx = self._get_dataset_and_sample_index(idx)
+        # call SpeechToTextDataset.size(), return tuple: (n_frames, target_text_length)
         return self.datasets[dataset_idx].size(sample_idx)
 
     def num_tokens(self, index: int):

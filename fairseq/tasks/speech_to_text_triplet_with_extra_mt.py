@@ -84,20 +84,32 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
 
     def __init__(self, args, tgt_dict):
         super().__init__(args)
+        # path of dict.txt is originated from yaml file
         self.tgt_dict = tgt_dict
         self.data_cfg = S2TDataConfig(op.join(args.data, args.config_yaml))
 
     @classmethod
     def setup_task(cls, args, **kwargs):
+        """
+        indispensable: load dictionary.
+        this method is called in train.py
+
+        Returns: instance of this customized task class
+        """
+        # setup data config from the yaml file
         data_cfg = S2TDataConfig(op.join(args.data, args.config_yaml))
-        dict_path = op.join(args.data, data_cfg.vocab_filename)
+        # setup dict path
+        dict_path = op.join(args.data, args.langpairs, data_cfg.vocab_filename)
         if not op.isfile(dict_path):
             raise FileNotFoundError(f"Dict not found: {dict_path}")
+        # load target dict
         tgt_dict = Dictionary.load(dict_path)
         logger.info(f"dictionary size ({data_cfg.vocab_filename}): " f"{len(tgt_dict):,}")
+        # training subset filename should be start with 'train'
         if getattr(args, "train_subset", None) is not None:
             if not all(s.startswith("train") for s in args.train_subset.split(",")):
                 raise ValueError('Train splits should be named like "train*".')
+        # set external MT dataset path
         if args.external_parallel_mt_data is not None:
             if not op.isabs(args.external_parallel_mt_data):
                 args.external_parallel_mt_data = op.join(args.data, args.external_parallel_mt_data)
@@ -108,6 +120,10 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
         return cls(args, tgt_dict)
 
     def build_criterion(self, args):
+        """
+        same as above, this method is also called in train.py
+        Returns: instance of criterion class
+        """
         from fairseq import criterions
 
         if self.data_cfg.prepend_tgt_lang_tag and args.ignore_prefix_size != 1:
@@ -146,9 +162,17 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
         return text_dataset
 
     def load_dataset(self, split, epoch=1, combine=False, **kwargs):
+        """
+        important method for task class, called in train.py
+        """
+        # varify split is training set or net
         is_train_split = split.startswith("train")
+        # instantiation tokenizer which corresponding file is in one of the fairseq/data/encoders directory
+        # in the case of this project, there is no pre-tokenizer, see ConST/prepare_data/data_utils.py
         pre_tokenizer = self.build_tokenizer(self.args)
+        # set sentencepiece as bpe model, specific settings are in ConST/prepare_data/data_utils.py
         bpe_tokenizer = self.build_bpe(self.args)
+        # get a list from tsv file, then call _from_list，return an instance of ConcatDataset
         st_dataset = SpeechTextTripleDatasetCreator.from_tsv(
             self.args.data,
             self.data_cfg,
@@ -160,9 +184,11 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
             epoch=epoch,
             seed=self.args.seed
         )
+        # load MT dataset，get an instance of LanguagePairDataset
         text_dataset = None
         if self.args.external_parallel_mt_data is not None and is_train_split:
             text_dataset = self.load_langpair_dataset()
+        # construct MultiModalityDataset through speech and external MT dataset
         if text_dataset is not None:
             mdsets = [
                 ModalityDatasetItem(
@@ -180,6 +206,7 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
                     self.args.batch_size
                 )
             ]
+            # set datasets into instance attribute
             self.datasets[split] = MultiModalityDataset(mdsets)
         else:
             self.datasets[split] = st_dataset
@@ -200,6 +227,7 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
         data_buffer_size=0,
         disable_iterator_cache=False,
     ):
+        # if not use external MT dataset, call upper class method
         if not isinstance(dataset, MultiModalityDataset):
             return super(SpeechToTextTripletWithExtraMTTask, self).get_batch_iterator(
                 dataset,
@@ -253,6 +281,7 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
     def build_model(self, args):
         args.input_feat_per_channel = self.data_cfg.input_feat_per_channel
         args.input_channels = self.data_cfg.input_channels
+        # build model by call upper class method
         model = super(SpeechToTextTripletWithExtraMTTask, self).build_model(args)
 
         if getattr(args, "eval_bleu", False):
@@ -262,14 +291,17 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
                 "to disable detokenization, e.g., when using sentencepiece)"
             )
             detok_args = json.loads(getattr(args, "eval_bleu_detok_args", "{}") or "{}")
+            # moses detokenizer
             self.tokenizer = encoders.build_tokenizer(
                 Namespace(tokenizer=getattr(args, "eval_bleu_detok", None), **detok_args))
             if args.eval_bleu_bpe is None:
                 self.bpe = None
             else:
+                # sentencepiece model
                 self.bpe = self.build_bpe(self.args)
-
+            # beam search args
             gen_args = json.loads(getattr(args, "eval_bleu_args", "{}") or "{}")
+            # decode generator
             self.sequence_generator = self.build_generator([model], Namespace(**gen_args))
 
         return model
@@ -281,6 +313,9 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
         seq_gen_cls=None,
         extra_gen_cls_kwargs=None,
     ):
+        """
+            Build a :class:`~fairseq.SequenceGenerator` instance for this task.
+        """
         if self.data_cfg.prepend_tgt_lang_tag and args.prefix_size != 1:
             raise ValueError(
                 'Please set "--prefix-size 1" since '
@@ -291,6 +326,7 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
             for s, i in self.tgt_dict.indices.items()
             if SpeechTextTripleDataset.is_lang_tag(s)
         }
+        # remove language token during generating
         extra_gen_cls_kwargs = {"symbols_to_strip_from_output": lang_token_ids}
         return super().build_generator(
             models, args, seq_gen_cls=None, extra_gen_cls_kwargs=extra_gen_cls_kwargs
@@ -305,6 +341,7 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
         return encoders.build_bpe(Namespace(**self.data_cfg.bpe_tokenizer))
 
     def get_interactive_tokens_and_lengths(self, lines, encode_fn):
+        """get audio and text token lengths"""
         n_frames = [get_features_or_waveform(p).shape[0] for p in lines]
         return lines, n_frames
 
@@ -314,6 +351,7 @@ class SpeechToTextTripletWithExtraMTTask(LegacyFairseqTask):
         )
 
     def valid_step(self, sample, model, criterion):
+        """validation with scareBleu evaluation"""
         loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
         if self.args.eval_bleu:
             bleu = self._inference_with_bleu(self.sequence_generator, sample, model)

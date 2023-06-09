@@ -126,6 +126,10 @@ class S2TDataConfig(object):
         cfg["transforms"] = cur
         return cfg
 
+    @property
+    def language_pair(self):
+        return self.config.get("language_pair", "en-de")
+
 
 def is_npy_data(data: bytes) -> bool:
     return data[0] == 147 and data[1] == 78
@@ -187,9 +191,11 @@ def get_features_or_waveform(path: str, need_waveform=False):
     _path, *extra = path.split(":")
     if not op.exists(_path):
         raise FileNotFoundError(f"File not found: {_path}")
-    if len(extra) == 0:
+    if len(extra) == 0:  # no offset and n_frames information
         if need_waveform:
+            # audio_utils.get_waveform() method: return tuple (waveform, sample_rate)
             return get_waveform(_path)[0]
+        # doesn't need waveform, directly get features
         return get_features_from_npy_or_audio(_path)
     elif len(extra) == 2:
         extra = [int(i) for i in extra]
@@ -197,7 +203,9 @@ def get_features_or_waveform(path: str, need_waveform=False):
             features_or_waveform = get_features_or_waveform_from_uncompressed_zip(
                 _path, extra[0], extra[1], need_waveform=need_waveform
             )
-        else: # _path.endswith(".wav")
+        else:  # _path.endswith(".wav")
+            # get waveform through torchaudio.load() torchaudio.load() returns (channel, frames) tensor,
+            # we use single channel audio, the shape of output should be (1, frames)
             features_or_waveform = get_raw_waveform_from_audio(
                 _path, extra[0], extra[1])
     else:
@@ -214,6 +222,8 @@ def _collate_frames(
     Args:
         frames (list): list of 2D frames of size L[i]*f_dim. Where L[i] is
             length of i-th frame and f_dim is static dimension of features
+
+            if is_audio_input == True, Tensor should be 1D tensor, and return 2D Tensor
     Returns:
         3D tensor of size len(frames)*len_max*f_dim where len_max is max of L[i]
     """
@@ -222,6 +232,7 @@ def _collate_frames(
         out = frames[0].new_zeros((len(frames), max_len))
     else:
         out = frames[0].new_zeros((len(frames), max_len, frames[0].size(1)))
+    # set corresponding tensor values in frames to out
     for i, v in enumerate(frames):
         out[i, : v.size(0)] = v
     return out
@@ -419,6 +430,7 @@ class SpeechToTextDataset(FairseqDataset):
 
 
 class SpeechToTextDatasetCreator(object):
+    # this columns should be identical with name of heads in tsv file
     # mandatory columns
     KEY_ID, KEY_AUDIO, KEY_N_FRAMES = "id", "audio", "n_frames"
     KEY_TGT_TEXT = "tgt_text"
@@ -454,6 +466,7 @@ class SpeechToTextDatasetCreator(object):
             speakers.extend([ss.get(cls.KEY_SPEAKER, cls.DEFAULT_SPEAKER) for ss in s])
             src_langs.extend([ss.get(cls.KEY_SRC_LANG, cls.DEFAULT_LANG) for ss in s])
             tgt_langs.extend([ss.get(cls.KEY_TGT_LANG, cls.DEFAULT_LANG) for ss in s])
+        # return SpeechToTextDataset instance
         return SpeechToTextDataset(
             split_name,
             is_train_split,

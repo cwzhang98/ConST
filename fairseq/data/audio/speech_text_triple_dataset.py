@@ -52,47 +52,68 @@ class SpeechTextTripleDataset(SpeechToTextDataset):
                          data_cfg, audio_paths, n_frames,
                          src_texts, tgt_texts, speakers, src_langs, tgt_langs,
                          ids, tgt_dict, pre_tokenizer, bpe_tokenizer)
-        self.dataset_type = "st" # default
+        self.dataset_type = "st"  # default
         if "mt" in split:
             self.dataset_type = "mt"
         self.check_src_lang_tag()
 
     def check_src_lang_tag(self):
+        # prepend_src_lang_tag: True, see prep_mustc_data.py
         if self.data_cfg.prepend_src_lang_tag:
             assert self.src_langs is not None and self.tgt_dict is not None
+            # ['<lang:en>']
             src_lang_tags = [
                 self.LANG_TAG_TEMPLATE.format(t) for t in set(self.src_langs)
             ]
+            # source language tag should be contained in dictionary
             assert all(t in self.tgt_dict for t in src_lang_tags)
 
     def __getitem__(
             self, index: int
     ) -> Tuple[int, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        the original method in SpeechToTextDataset only return source audio and target text features
+        override it to sport (audio, transcript, translation) triplet
+        extract features for an example
+        Args:
+            index: index of training examples
 
+        Returns:(index, audio:tensor, )
+
+        """
         audio = None
         if self.dataset_type == "st":
+            # use_audio_input: True/False: get waveform/features
+            # in this case of ConST, get waveform
             audio = get_features_or_waveform(
                 self.audio_paths[index], need_waveform=self.data_cfg.use_audio_input
             )
             if self.feature_transforms is not None:
+                # could implement data augment here, but no transform was assign in ConST
                 assert not self.data_cfg.use_audio_input
                 audio = self.feature_transforms(audio)
-            if isinstance(audio, np.ndarray):
+            if isinstance(audio, np.ndarray):  # if audio is get form .npy file
                 audio = torch.from_numpy(audio).float()
-            if self.data_cfg.use_audio_input:
+            if self.data_cfg.use_audio_input:  # if audio is waveform
                 audio = audio.squeeze(0)
 
         src_text = None
         if self.src_texts is not None:
+            # tokenize text through pre_tokenizer(here is None) and bpe_tokenizer
             tokenized = self.tokenize_text(self.src_texts[index])
+            # encode tokenized text use fairseq.Dictionary.encode_line(), return 1-d int tensor, convert to long tensor
             src_text = self.tgt_dict.encode_line(
                 tokenized, add_if_not_exist=False, append_eos=True
             ).long()
+            # prepend source lang tag
             if self.data_cfg.prepend_src_lang_tag:
+                # get tag
                 lang_tag = self.LANG_TAG_TEMPLATE.format(self.src_langs[index])
+                # get index of tag in dict
                 lang_tag_idx = self.tgt_dict.index(lang_tag)
+                # concat tag index into text tensor
                 src_text = torch.cat((torch.LongTensor([lang_tag_idx]), src_text), 0)
-
+        # process target txt same as above
         tgt_text = None
         if self.tgt_texts is not None:
             tokenized = self.tokenize_text(self.tgt_texts[index])
@@ -107,10 +128,15 @@ class SpeechTextTripleDataset(SpeechToTextDataset):
         return index, audio, src_text, tgt_text
 
     def collater(self, samples: List[Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]]) -> Dict:
+        """
+         Merge a list of samples to form a mini-batch
+        """
         if len(samples) == 0:
             return {}
+        # get index list of samples
         indices = torch.tensor([i for i, _, _, _ in samples], dtype=torch.long)
         if self.dataset_type == "st":
+            # get a batched 2D padded audio Tensor
             frames = _collate_frames(
                 [s for _, s, _, _ in samples], self.data_cfg.use_audio_input
             )
@@ -127,22 +153,24 @@ class SpeechTextTripleDataset(SpeechToTextDataset):
         prev_output_source_tokens = None
         src_ntokens = None
         if self.src_texts is not None:
+            # get a batched 2D padded text Tensor
             source = fairseq_data_utils.collate_tokens(
                 [s for _, _, s, _ in samples],
                 self.tgt_dict.pad(), self.tgt_dict.eos(),
                 left_pad=False,
                 move_eos_to_beginning=False,
             )
-
+            # if MT dataset, sort text samples by descending number of text tokens
             if self.dataset_type == "mt":
                 source_lengths = torch.tensor([s.size(0) for _, _, s, _ in samples], dtype=torch.long)
                 source_lengths, order = source_lengths.sort(descending=True)
-
             source = source.index_select(0, order)
+            # if ST dataset, the order of text tokens keep same as audio
             if self.dataset_type == "st":
                 source_lengths = torch.tensor(
                     [s.size() for _, _, s, _ in samples], dtype=torch.long
                 ).index_select(0, order)
+            # sum up total source text tokens
             src_ntokens = sum(s.size(0) for _, _, s, _ in samples)
             prev_output_source_tokens = fairseq_data_utils.collate_tokens(
                 [s for _, _, s, _ in samples],
@@ -152,7 +180,7 @@ class SpeechTextTripleDataset(SpeechToTextDataset):
                 move_eos_to_beginning=True,
             )
             prev_output_source_tokens = prev_output_source_tokens.index_select(0, order)
-        # process target text
+        # process target text, same as above
         target, target_lengths = None, None
         prev_output_target_tokens = None
         tgt_ntokens = None
@@ -211,12 +239,14 @@ class SpeechTextTripleDatasetCreator(SpeechToTextDatasetCreator):
             pre_tokenizer,
             bpe_tokenizer,
     ) -> SpeechTextTripleDataset:
+        # fields corresponding to tsv columns
         audio_paths, n_frames, src_texts, tgt_texts, ids = [], [], [], [], []
         speakers, src_langs, tgt_langs = [], [], []
+        # write fields values in to these lists
         for s in samples:
             ids.extend([ss.get(cls.KEY_ID, None) for ss in s])
             audio_paths.extend(
-                [os.path.join(data_cfg.audio_root, ss.get(cls.KEY_AUDIO, "")) for ss in s]
+                [os.path.join(data_cfg.audio_root.replace(data_cfg.language_pair, ""), ss.get(cls.KEY_AUDIO, "")) for ss in s]
             )
             n_frames.extend([int(ss.get(cls.KEY_N_FRAMES, 0)) for ss in s])
             tgt_texts.extend([ss[cls.KEY_TGT_TEXT] for ss in s])
@@ -259,16 +289,20 @@ class SpeechTextTripleDatasetCreator(SpeechToTextDatasetCreator):
         samples = []
         _splits = splits.split(",")
         for split in _splits:
-            tsv_path = os.path.join(root, f"{split}.tsv")
+            tsv_path = os.path.join(data_cfg.audio_root, f"{split}.tsv")
             if not os.path.isfile(tsv_path):
                 raise FileNotFoundError(f"Dataset not found: {tsv_path}")
             with open(tsv_path) as f:
+                # iterable object which every element is a dict
                 reader = csv.DictReader(f, delimiter="\t", quotechar=None,
                                         doublequote=False, lineterminator="\n",
                                         quoting=csv.QUOTE_NONE)
+                # append a list into sample list, now samples is a 2-dim list, number of 1st dim represents the
+                # number of splits
                 samples.append([dict(e) for e in reader])
                 assert len(samples) > 0
-
+        # name: str, s: list
+        # get list of instance of SpeechTextTripleDataset
         datasets = [
             cls._from_list(
                 name,
@@ -281,7 +315,7 @@ class SpeechTextTripleDatasetCreator(SpeechToTextDatasetCreator):
             )
             for name, s in zip(_splits, samples)
         ]
-
+        # if there are multiple train split, apply sample strategy
         if is_train_split and len(_splits) > 1 and data_cfg.sampling_alpha != 1.0:
             size_ratios = cls._get_size_ratios(
                 _splits, [len(s) for s in samples], alpha=data_cfg.sampling_alpha
@@ -292,4 +326,5 @@ class SpeechTextTripleDatasetCreator(SpeechToTextDatasetCreator):
                 )
                 for d, r in zip(datasets, size_ratios)
             ]
+        # return instance of ConcatDataset(), in case of multiple train split
         return ConcatDataset(datasets)

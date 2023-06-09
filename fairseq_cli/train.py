@@ -63,7 +63,8 @@ def main(cfg: DictConfig) -> None:
     logger.info(cfg)
     OmegaConf.save(config=cfg, f=f"{cfg.model.save_dir}/configs.yml")
 
-    # Setup task, e.g., translation, language modeling, etc.
+    # Setup task, e.g., translation, language modeling, etc. call setup_task() in task/__init__.py, than call the
+    # setup_task() in target task class and return instance of target class.
     task = tasks.setup_task(cfg.task)
     # Load valid dataset (we load training data below, based on the latest checkpoint)
     for valid_sub_split in cfg.dataset.valid_subset.split(","):
@@ -134,7 +135,7 @@ def main(cfg: DictConfig) -> None:
 
         # only use first validation loss to update the learning rate
         lr = trainer.lr_step(epoch_itr.epoch, valid_losses[0])
-
+        # load training subset in get_train_iterator() method
         epoch_itr = trainer.get_train_iterator(
             epoch_itr.next_epoch_idx,
             # sharded data: get train iterator for next epoch

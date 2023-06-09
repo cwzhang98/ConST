@@ -106,31 +106,38 @@ class LabelSmoothedCrossEntropyWithContrastiveCriterion(LabelSmoothedCrossEntrop
                             is_text=False, return_short_audio_len=False):
         short_audio_len = None
         if is_text:
+            # get text embedding hidden state, needs to apply a forward pass in embedding layer
             encoder_out, encoder_padding_mask = model.encoder.embedding_text(
                 sample["source"], sample["source_lengths"])
         else:
+            # get audio embedding sequence
             encoder_out = packed_encoder_out.encoder_embedding
             encoder_padding_mask = packed_encoder_out.encoder_padding_mask
+            # get length of audio embedding sequence
             short_audio_len = packed_encoder_out.output_encoder_lengths
         encoder_out = encoder_out.transpose(0, 1) # T x B x hid -> B x T x hid
         encoder_padding_mask = (~encoder_padding_mask).float()
+        # apply padding mask first, then average the sequence get sentence-level hidden state
         seq_hidden = (encoder_out * encoder_padding_mask.unsqueeze(-1)).sum(dim=1) / encoder_padding_mask.sum(dim=1).unsqueeze(-1)
         return seq_hidden, short_audio_len
 
     def compute_contrastive_loss(self, model, sample, encoder_out,
                                  reduce=True, return_short_audio_len=True):
+        # get sentence-level audio hidden state and audio embedding length
         audio_seq_hidden, short_audio_len = self.get_sequence_hidden(model, sample, encoder_out,
                                                                      is_text=False,
                                                                      return_short_audio_len=return_short_audio_len) # B x h
-
+        # get sentence-level text hidden state
         text_seq_hidden, _ = self.get_sequence_hidden(model, sample, encoder_out, is_text=True) # B x h
         batch_size, hidden_size = audio_seq_hidden.size()
+        # compute cosine similarity matrix
         logits = F.cosine_similarity(audio_seq_hidden.expand((batch_size, batch_size, hidden_size)),
                                      text_seq_hidden.expand((batch_size, batch_size, hidden_size)).transpose(0, 1),
                                      dim=-1)
+        # divide temperature
         logits /= self.contrastive_temperature
-
-        if self.use_dual_ctr:
+        # diag: only use the LogSoftmax result that compute corresponding audio and text embedding as loss
+        if self.use_dual_ctr:  # dual ctr loss
             loss_audio = -torch.nn.LogSoftmax(0)(logits).diag()
             loss_text = -torch.nn.LogSoftmax(1)(logits).diag()
             loss = loss_audio + loss_text
@@ -138,6 +145,7 @@ class LabelSmoothedCrossEntropyWithContrastiveCriterion(LabelSmoothedCrossEntrop
             loss = -torch.nn.LogSoftmax(0)(logits).diag()
 
         if reduce:
+            # summation
             loss = loss.sum()
         return loss, short_audio_len
 

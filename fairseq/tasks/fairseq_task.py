@@ -221,6 +221,7 @@ class FairseqTask(object):
         can_reuse_epoch_itr = not disable_iterator_cache and self.can_reuse_epoch_itr(
             dataset
         )
+        # reuse epoch iterator
         if can_reuse_epoch_itr and dataset in self.dataset_to_epoch_iter:
             logger.debug("reusing EpochBatchIterator for epoch {}".format(epoch))
             return self.dataset_to_epoch_iter[dataset]
@@ -232,6 +233,7 @@ class FairseqTask(object):
 
         # get indices ordered by example size
         with data_utils.numpy_seed(seed):
+            # descending order of indices
             indices = dataset.ordered_indices()
 
         # filter examples that are too large

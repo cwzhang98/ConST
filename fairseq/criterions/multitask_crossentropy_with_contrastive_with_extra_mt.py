@@ -46,10 +46,14 @@ class MultiTaskCrossEntropyWithContrastiveWithExtraMT(LabelSmoothedCrossEntropyW
             sample["net_input"]["is_text_input"] = True
         else:
             sample["net_input"]["is_text_input"] = False
-
+        # forward in network, get decoder/encoder output
         _net_output = model(**sample["net_input"])  # (x, extra)
         if model.training:
+            # only compute contrastive loss during training
             net_output, encoder_out = _net_output
+            # if apply mt task, no need to calculate contrastive loss
+            # so the encoder_out pass to compute_contrastive_loss() func is
+            # a NamedTuple output by encoder which input is audio
             if (sample["dataset_type"] != "mt") and (self.contrastive_weight > 0):
                 contrastive_loss, short_audio_len = self.compute_contrastive_loss(
                     model, sample, encoder_out,
@@ -60,13 +64,14 @@ class MultiTaskCrossEntropyWithContrastiveWithExtraMT(LabelSmoothedCrossEntropyW
 
         if sample["target"] is not None:
             if sample["dataset_type"] == "st" and model.training:
+                # st asr mt joint loss
                 label_smoothed_nll_loss, nll_loss = self.compute_loss(model, net_output, sample, reduce=reduce)
                 label_smoothed_nll_loss_asr, nll_loss_asr = self.compute_loss_asr(model, sample, reduce=reduce)
                 label_smoothed_nll_loss_mt, nll_loss_mt = self.compute_loss_mt(model, sample, reduce=reduce)
 
             else:  # mt type compute CE_mt loss
                 label_smoothed_nll_loss_mt, nll_loss_mt = self.compute_loss(model, net_output, sample, reduce=reduce)
-
+        # set some logging output information
         if sample["dataset_type"] == "st":
             source_ntokens = sample["source_ntokens"]
             target_ntokens = sample["target_ntokens"]
@@ -82,7 +87,9 @@ class MultiTaskCrossEntropyWithContrastiveWithExtraMT(LabelSmoothedCrossEntropyW
 
         nsentences = sample["target"].size(0)
         if sample["dataset_type"] == "st":
+            # multitask joint loss
             multi_ce_loss = label_smoothed_nll_loss + label_smoothed_nll_loss_asr + label_smoothed_nll_loss_mt
+            # plus contrastive loss
             loss = multi_ce_loss + self.contrastive_weight * contrastive_loss
         else:
             loss = label_smoothed_nll_loss_mt
@@ -111,20 +118,24 @@ class MultiTaskCrossEntropyWithContrastiveWithExtraMT(LabelSmoothedCrossEntropyW
         return loss, sample_size, logging_output
 
     def compute_loss_asr(self, model, sample, reduce=True):
+        # network forward for asr task, get decoder output
         net_output, _ = model(sample["net_input"]["src_tokens"],
                               sample["net_input"]["src_lengths"],
                               sample["prev_output_src_tokens"])
+        # get log probabilities
         lprobs = model.get_normalized_probs(net_output, log_probs=True)
+        # asr target is the "source"
         target = sample["source"]
         if self.ignore_prefix_size > 0:
+            # ignore the prefix
             if getattr(lprobs, "batch_first", False):
                 lprobs = lprobs[:, self.ignore_prefix_size:, :].contiguous()
                 target = target[:, self.ignore_prefix_size:].contiguous()
             else:
                 lprobs = lprobs[self.ignore_prefix_size:, :, :].contiguous()
                 target = target[self.ignore_prefix_size:, :].contiguous()
-        lprobs = lprobs.view(-1, lprobs.size(-1))
-        target = target.view(-1)
+        lprobs = lprobs.view(-1, lprobs.size(-1))  # (B x T, D) 2-d tensor
+        target = target.view(-1)  # (B x T) 1-d tensor
         loss, nll_loss = label_smoothed_nll_loss(
             lprobs,
             target,
@@ -135,6 +146,7 @@ class MultiTaskCrossEntropyWithContrastiveWithExtraMT(LabelSmoothedCrossEntropyW
         return loss, nll_loss
 
     def compute_loss_mt(self, model, sample, reduce=True):
+        """ same as above """
         net_output, _ = model(sample["source"], sample["source_lengths"],
                               sample["net_input"]["prev_output_tokens"], is_text_input=True)
 
